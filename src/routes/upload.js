@@ -13,151 +13,208 @@ if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-// Configure Multer for Excel file upload
+// Multer config
 const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadDir);
-  },
-  filename: function (req, file, cb) {
-    cb(null, Date.now() + '-' + file.originalname);
-  }
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) =>
+    cb(null, Date.now() + '-' + file.originalname),
 });
 
-const upload = multer({
-  storage: storage,
-  fileFilter: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    if (ext !== '.xlsx' && ext !== '.xls') {
-      return cb(new Error('Only Excel files are allowed'));
-    }
-    cb(null, true);
-  }
-});
-
+const upload = multer({ storage });
 const uploadMiddleware = upload.single('file');
 
-// Helper function to normalize Excel headers
-const normalizeKey = (key) => {
-  if (!key) return '';
-  return key
-    .toString()
-    .toLowerCase()
-    .trim()
-    .replace(/\(.*\)/g, '')         // Remove content in parentheses like (USD)
-    .replace(/\s+/g, '_')           // Replace spaces with underscores
-    .replace(/[^a-z0-9_]/g, '')     // Remove non-alphanumeric except underscores
-    .replace(/_{2,}/g, '_')         // Replace multiple underscores with single
-    .trim()
-    .replace(/^_+|_+$/g, '');       // Trim leading/trailing underscores
-};
-
+// ================= ROUTE =================
 router.post('/', (req, res) => {
   uploadMiddleware(req, res, async function (err) {
-    if (err) {
-      return res.status(400).json({ success: false, error: err.message });
-    }
-
-    if (!req.file) {
-      return res.status(400).json({ success: false, error: 'No file uploaded' });
-    }
+    if (err) return res.status(400).json({ success: false, error: err.message });
+    if (!req.file) return res.status(400).json({ success: false, error: 'No file uploaded' });
 
     try {
-      // Parse Excel file with cellDates: true to handle Excel serial dates
       const workbook = xlsx.readFile(req.file.path, { cellDates: true });
-      const sheetName = workbook.SheetNames[0];
+
+      const sheetName = "All State Golf Intel Master-Exp";
       const sheet = workbook.Sheets[sheetName];
 
-      /**
-       * 1. Skip top rows:
-       * range: 5 tells xlsx to start reading from row 6 (0-indexed).
-       * Row 6 becomes the header row for sheet_to_json.
-       */
-      const rawData = xlsx.utils.sheet_to_json(sheet, { range: 5, defval: "" });
-
-      if (rawData.length > 0) {
-        console.log('--- DEBUG: Call Center Data Parsing ---');
-        console.log('Detected keys:', Object.keys(rawData[0]));
-        const mapping = {};
-        Object.keys(rawData[0]).forEach(k => mapping[normalizeKey(k)] = k);
-        console.log('Normalized mapping:', mapping);
-        console.log('---------------------------');
+      if (!sheet) {
+        return res.status(400).json({
+          success: false,
+          error: `Sheet not found. Available: ${workbook.SheetNames.join(", ")}`
+        });
       }
+
+      console.log(`--- DEBUG: Using Sheet: ${sheetName} ---`);
+
+      // ================= 🔥 HEADER FIX =================
+      let rawData = [];
+      let headerRowIndex = -1;
+
+      for (let i = 0; i < 10; i++) {
+        const temp = xlsx.utils.sheet_to_json(sheet, {
+          range: i,
+          defval: ""
+        });
+
+        if (!temp.length) continue;
+
+        const keys = Object.keys(temp[0]).map(k => k.toLowerCase());
+
+        console.log(`👉 Checking row ${i + 1}:`, keys);
+
+        if (
+          keys.includes("state") &&
+          keys.includes("slug") &&
+          keys.includes("city")
+        ) {
+          console.log(`✅ HEADER FOUND AT ROW: ${i + 1}`);
+          rawData = temp;
+          headerRowIndex = i;
+          break;
+        }
+      }
+
+      if (!rawData.length) {
+        return res.status(400).json({
+          success: false,
+          error: "Header row not found"
+        });
+      }
+
+      console.log("HEADERS:", Object.keys(rawData[0]));
+
+      // ================= SMART MAPPING =================
+      const findValue = (obj, keyword) => {
+        const key = Object.keys(obj).find(k =>
+          k.toLowerCase().includes(keyword)
+        );
+        return key ? obj[key] : null;
+      };
 
       let insertedCount = 0;
       const errors = [];
 
-      // Validate and insert rows
       for (const [index, row] of rawData.entries()) {
-        // 2. Normalize and Map Keys
-        const normalizedRow = {};
-        Object.keys(row).forEach(key => {
-          normalizedRow[normalizeKey(key)] = row[key];
-        });
 
-        const callData = {
-          ticket_id: normalizedRow["id"],
-          customer_name: normalizedRow["customer_name"],
-          sentiment: normalizedRow["sentiment"],
-          csat_score: normalizedRow["csat_score"],
-          call_timestamp: normalizedRow["call_timestamp"],
-          reason: normalizedRow["reason"],
-          city: normalizedRow["city"],
-          state: normalizedRow["state"],
-          channel: normalizedRow["channel"],
-          response_time: normalizedRow["response_time"],
-          call_duration: normalizedRow["call_duration"],
-          call_center: normalizedRow["call_center"]
+        const resortData = {
+          state: findValue(row, "state"),
+          resort_name: findValue(row, "resort"),
+          slug: findValue(row, "slug"),
+          city: findValue(row, "city"),
+          image_url: findValue(row, "image"),
+          stay_play_from: findValue(row, "stay"),
+          resort_tier: findValue(row, "tier"),
+          category_tags: findValue(row, "category"),
+          holes_count: findValue(row, "holes"),
+          courses_count: findValue(row, "courses"),
+          course_difficulty: findValue(row, "difficulty"),
+          handicap_recommendation: findValue(row, "handicap"),
+          beginner_friendly: findValue(row, "beginner"),
+          group_size_fit: findValue(row, "group"),
+          trip_type_primary: findValue(row, "trip"),
+          best_season: findValue(row, "season"),
+          weather_badge: findValue(row, "weather"),
+          season_insight: findValue(row, "insight"),
+          ui_badges: findValue(row, "badge"),
+          onsite_golf_strength: findValue(row, "strength"),
+          stay_play_complexity: findValue(row, "complexity"),
+          "18stays_take": findValue(row, "18stays"),
+          golf_trip_score: findValue(row, "golf"),
+          buddy_trip_score: findValue(row, "buddy"),
+          luxury_score: findValue(row, "luxury"),
+          value_score: findValue(row, "value"),
+          beginner_score: findValue(row, "beginner_score"),
+          advanced_golfer_score: findValue(row, "advanced"),
+          data_confidence: findValue(row, "confidence"),
         };
 
-        // 3. Validation: require ticket_id and customer_name at minimum
-        if (!callData.ticket_id) {
-          errors.push(`Row ${index + 7}: Missing ID.`); // index + 7 because we skipped 5 rows and headers are on row 6
+        if (index === 0) {
+          console.log("🔥 FIRST ROW MAPPED:", resortData);
+        }
+
+        if (!resortData.resort_name) {
+          errors.push(`Row ${index + headerRowIndex + 2}: Missing resort_name`);
           continue;
         }
 
-        // 4. Insert into PostgreSQL
         const query = `
-          INSERT INTO golf_scores (ticket_id, customer_name, sentiment, csat_score, call_timestamp, reason, city, state, channel, response_time, call_duration, call_center)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+          INSERT INTO golf_resorts (
+            state, resort_name, slug, city, image_url,
+            stay_play_from, resort_tier, category_tags,
+            holes_count, courses_count,
+            course_difficulty, handicap_recommendation,
+            beginner_friendly, group_size_fit,
+            trip_type_primary, best_season, weather_badge,
+            season_insight, ui_badges,
+            onsite_golf_strength, stay_play_complexity,
+            "18stays_take",
+            golf_trip_score, buddy_trip_score, luxury_score,
+            value_score, beginner_score, advanced_golfer_score,
+            data_confidence
+          )
+          VALUES (
+            $1,$2,$3,$4,$5,
+            $6,$7,$8,
+            $9,$10,
+            $11,$12,
+            $13,$14,
+            $15,$16,$17,
+            $18,$19,
+            $20,$21,
+            $22,
+            $23,$24,$25,
+            $26,$27,$28,
+            $29
+          )
+             ON CONFLICT (slug) DO NOTHING
         `;
+
         const values = [
-          callData.ticket_id,
-          callData.customer_name,
-          callData.sentiment,
-          callData.csat_score ? Number(callData.csat_score) : null,
-          callData.call_timestamp,
-          callData.reason,
-          callData.city,
-          callData.state,
-          callData.channel,
-          callData.response_time,
-          callData.call_duration ? Number(callData.call_duration) : null,
-          callData.call_center
+          resortData.state,
+          resortData.resort_name,
+          resortData.slug,
+          resortData.city,
+          resortData.image_url,
+          resortData.stay_play_from,
+          resortData.resort_tier,
+          resortData.category_tags,
+          resortData.holes_count ? parseInt(resortData.holes_count) : null,
+          resortData.courses_count ? parseInt(resortData.courses_count) : null,
+          resortData.course_difficulty,
+          resortData.handicap_recommendation,
+          resortData.beginner_friendly === 'Yes' || resortData.beginner_friendly === true,
+          resortData.group_size_fit,
+          resortData.trip_type_primary,
+          resortData.best_season,
+          resortData.weather_badge,
+          resortData.season_insight,
+          resortData.ui_badges,
+          resortData.onsite_golf_strength,
+          resortData.stay_play_complexity,
+          resortData["18stays_take"],
+          resortData.golf_trip_score ? parseFloat(resortData.golf_trip_score) : null,
+          resortData.buddy_trip_score ? parseFloat(resortData.buddy_trip_score) : null,
+          resortData.luxury_score ? parseFloat(resortData.luxury_score) : null,
+          resortData.value_score ? parseFloat(resortData.value_score) : null,
+          resortData.beginner_score ? parseFloat(resortData.beginner_score) : null,
+          resortData.advanced_golfer_score ? parseFloat(resortData.advanced_golfer_score) : null,
+          resortData.data_confidence ? parseFloat(resortData.data_confidence) : null
         ];
 
         await db.query(query, values);
         insertedCount++;
       }
 
-      // Clean up uploaded file
       fs.unlinkSync(req.file.path);
 
       res.json({
         success: true,
         inserted: insertedCount,
         skipped: errors.length,
-        errors: errors.length > 0 ? errors : undefined
+        errors
       });
 
     } catch (error) {
-      console.error('Error processing upload:', error);
-
-      // Clean up file if an exception occurred during processing
-      if (req.file && fs.existsSync(req.file.path)) {
-        fs.unlinkSync(req.file.path);
-      }
-
-      res.status(500).json({ success: false, error: 'Internal server error processing file' });
+      console.error(error);
+      res.status(500).json({ success: false, error: 'Server error' });
     }
   });
 });
